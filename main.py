@@ -41,7 +41,19 @@ class Token(BaseModel):
     token_type: str
 
 
+class DependsGroup:
+    def __init__(self, groups: list):
+        self.groups = groups
+
+    async def __call__(self):
+        group = await decode_token(token = oauth2_scheme, group=True)
+        if group not in self.groups:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="You don`t have permissions")
+
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+group_routes = {'admin-panel': DependsGroup(['admin', 'dev', 'owner'])}
 
 
 async def async_return_engine():
@@ -99,6 +111,7 @@ async def decode_token(token, group=False):
         headers={"WWW-Authenticate": "Bearer"}
     )
     try:
+        print(token)
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
@@ -139,12 +152,8 @@ async def get_user_group(group: str = Depends(get_group)):
 
 # TEST
 @app.get("/admin-panel")
-async def admin_panel(group: str = Depends(get_group)):
-    if group not in ['admin', 'dev', 'owner']:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail="You dont have permissions")
-    else:
-        return {'admin-panel': 'you have permissions'}
+async def admin_panel(group: str = Depends(group_routes['admin-panel'])):
+    return {'detail': 'you have perm'}
 
 
 
