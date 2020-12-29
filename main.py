@@ -1,9 +1,10 @@
 # from os import environ
 from dotenv import load_dotenv
 from pathlib import Path
+from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, AsyncEngine
 from sqlalchemy.exc import IntegrityError
@@ -35,6 +36,14 @@ class UserValidation(BaseModel):
     username: str
 
 
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
 async def async_return_engine():
     engine = create_async_engine(f"postgresql+asyncpg://{USER}:{PASSWORD}@{HOST}:{PORT}/{DATABASE}?ssl=require")
     async with engine.begin() as conn:
@@ -62,24 +71,28 @@ async def login_user(username, password):
     async with AsyncSession(engine) as session:
         stmt = select(UserInDB).where(UserInDB.username == username)
         result_user = await session.execute(stmt)
-        if result_user.first():
+        user = result_user.scalar_one()
+        if user:
             stmt = select(Salt).where(Salt.user == username)
             result_salt = await session.execute(stmt)
-            hash_new_password = check_password_hash(password, result_salt.first().salt)
-            if hash_new_password != result_user.first().password:
+            user_salt = result_salt.scalar_one()
+            hash_new_password = check_password_hash(password, user_salt.salt)
+            if hash_new_password != user.password:
                 return False
         else:
             return False
-    return True
+    return user
 
 
 def create_token(*, data: dict):
     to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=5)
+    to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
 
-async def decode_token(token):
+async def decode_token(token, group=False):
     error_detail = HTTPException(
         status_code=401,
         detail="Bad data",
@@ -87,16 +100,54 @@ async def decode_token(token):
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("user")
+        username: str = payload.get("sub")
         if username is None:
             raise error_detail
+        if group is True:
+            user_group: str = payload.get("group")
+            return user_group
         valid_user = UserValidation(username=username)
-    except jwt.PyJWTError:
+    except jwt.PyJWTError as ex:
         raise error_detail
     engine = await async_return_engine()
     async with AsyncSession(engine) as session:
         stmt = select(UserInDB).where(UserInDB.username == valid_user.username)
         result = await session.execute(stmt)
-        if result.first() is None:
+        user = result.scalar_one()
+        if not user:
             raise error_detail
-        return result.first()
+        return user
+
+
+@app.post("/token", response_model=Token)
+async def login_in_acc(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = await login_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Bad Data", headers={"WWW-Authenticate": "Bearer"})
+    token = create_token(data={"sub": user.username, "group": user.group})
+    return {"access_token": token, "token_type": "bearer"}
+
+
+async def get_group(token: str = Depends(oauth2_scheme)):
+    return await decode_token(token, group=True)
+
+
+@app.get("/group")
+async def get_user_group(group: str = Depends(get_group)):
+    return {"group": group}
+
+
+# TEST
+@app.get("/admin-panel")
+async def admin_panel(group: str = Depends(get_group)):
+    if group not in ['admin', 'dev', 'owner']:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You dont have permissions")
+    else:
+        return {'admin-panel': 'you have permissions'}
+
+
+
+
+
+
