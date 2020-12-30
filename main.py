@@ -25,6 +25,7 @@ PORT = '5432'  # environ.get('PORT')
 DATABASE = 'd1p21lku7v294h'  # environ.get('DATABASE')
 SECRET_KEY = 'dester123456789dester'  # environ.get('SECRET_KEY')
 ALGORITHM = 'HS256'  # environ.get('ALGORITHM')
+ALL_GROUPS = ['default', 'vip', 'premium', 'holy', ' admin', 'dev', 'owner']
 
 
 class UserReg(BaseModel):
@@ -41,19 +42,31 @@ class Token(BaseModel):
     token_type: str
 
 
+class UserGroupChange(BaseModel):
+    username: str
+    new_group: str
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+async def get_group(token: str = Depends(oauth2_scheme)):
+    return await decode_token(token, group=True)
+
+
 class DependsGroup:
     def __init__(self, groups: list):
         self.groups = groups
 
-    async def __call__(self):
-        group = await decode_token(token = oauth2_scheme, group=True)
+    async def __call__(self, group: str = Depends(get_group)):
         if group not in self.groups:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                                 detail="You don`t have permissions")
+        else:
+            return group
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-group_routes = {'admin-panel': DependsGroup(['admin', 'dev', 'owner'])}
+group_routes = {'admin-panel': DependsGroup(['admin', 'dev', 'owner']), 'change_group': DependsGroup(['dev', 'owner'])}
 
 
 async def async_return_engine():
@@ -111,7 +124,6 @@ async def decode_token(token, group=False):
         headers={"WWW-Authenticate": "Bearer"}
     )
     try:
-        print(token)
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
@@ -141,10 +153,6 @@ async def login_in_acc(form_data: OAuth2PasswordRequestForm = Depends()):
     return {"access_token": token, "token_type": "bearer"}
 
 
-async def get_group(token: str = Depends(oauth2_scheme)):
-    return await decode_token(token, group=True)
-
-
 @app.get("/group")
 async def get_user_group(group: str = Depends(get_group)):
     return {"group": group}
@@ -154,6 +162,22 @@ async def get_user_group(group: str = Depends(get_group)):
 @app.get("/admin-panel")
 async def admin_panel(group: str = Depends(group_routes['admin-panel'])):
     return {'detail': 'you have perm'}
+
+
+@app.get("/change-group")
+async def user_group_change(user: UserGroupChange, my_group: str = Depends(group_routes['change_group']),
+                      engine: AsyncEngine = Depends(async_return_engine)):
+    try:
+        async with AsyncSession(engine) as session:
+            stmt = select(UserInDB).where(UserInDB.username == user.username)
+            result = await session.execute(stmt)
+            user_real = result.scalar_one()
+            if user_real:
+                if user.new_group in ALL_GROUPS:
+                    user_real.group = user.new_group
+            await session.commit
+    except:
+        raise HTTPException(status_code=401, detail="Bad data")
 
 
 
